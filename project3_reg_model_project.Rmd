@@ -1,0 +1,578 @@
+---
+title: "Modeling and prediction for movies"
+output: 
+  html_document: 
+    fig_height: 4
+    highlight: pygments
+    theme: spacelab
+---
+
+## Setup
+
+### Load packages
+
+```{r load-packages, message = FALSE}
+library(ggplot2)
+library(dplyr)
+library(statsr)
+library(GGally)
+library(gridExtra)
+library(plyr)
+```
+
+### Load data
+
+Make sure your data and R Markdown files are in the same directory. When loaded
+your data file will be called `movies`. Delete this note when before you submit 
+your work. 
+
+```{r load-data}
+load("movies.Rdata")
+```
+
+
+
+* * *
+
+## Part 1: Data
+
+The `movies` dataset consists of 651 random sample of movies, each row represents a movie along with its 32 attributes. Attributes are collected from Rotten Tomatoes and IMDB.
+
+Let's look at the structure of the `movies` dataset.
+```{r}
+names(movies)
+```
+
+```{r}
+str(movies)
+```
+
+Our goal is to find out **what attribute is associated with a popular movie**, as long as other interesting findings about a movie. The rating and scoring of a movie is stored in 5 responding variables: imdb_rating, critics_rating, critics_score, audience_rating, audience_score.   
+
+Since this dataset has two source(Rotten Tomatoes and IMDB), it would be better to check if there is any missing values.  
+```{r}
+sapply(movies, function(x) sum(is.na(x)))
+```
+
+Wow, there's indeed a few missing values in runtime, studio, dvd release time, director and actor informations. Luckily, the number of missing value is relatively small compare to the number of entries.   
+
+Some of the attributes which has missing value is not so important, for example `actor1` through `actor5` variables were just used to determine whether the movie casts an actor or actress who won a best actor or actress Oscar, they can be excluded from the analysis. `imdb_url` and `rt_url` can be excluded as well since they don't have anything to do with the analysis.  
+
+```{r}
+mv <- movies[1:25]
+```
+
+#### Two important points to clarify:  
+
+* On generabizability. Findings that might come out from this analysis is generable, for the movie is a random sample.  
+* On causality. Findings that might come out from this analysis may not show causality, for this is not an experiment, but just analysis from observation.
+
+* * *
+
+## Part 2: Research question
+
+* On scoring variables. There's 5 scoring attribute: `imdb_rating`, `critics_rating`, `critics_score`, `audience_rating`, `audience_score`.
+    * Is there any interrelationship among critics_rating/critics_score pair and audience_rating/audience_score pair?
+    * Can we find a way to construct them into a single variable as "grand score" as the dependent variable?
+    * Beside these 5 variables, there's one variable storing number of votes of a movie on IMDB. Should number of votes be taken into consideration when constructing the 'grand score' variable? Should we exclude the movie with very few votes?
+
+
+* On potential independent variables.  
+    * There are so many categorical variables. If a categorical variable don't have too many levels, we can group the dataframe by it to see if there is difference between groups.  
+    * Is there any pattern between theater/dvd release month and "grand score"?
+    * Is there a trend between theater/dvd release year and "grand score"?
+
+* * *
+
+## Part 3: Exploratory data analysis
+
+
+#### On scoring variables
+**First**, let's check if `critics_rating` and `critics_score` contain redundant information. 
+```{r}
+ggpairs(mv, columns = 15:16)
+```
+
+From the `critics_score` vs `critics_rating` plot and the `critics_rating` vs `critics_score` plot we can tell that there is some relationship between these two.  
+The rate category with the longest strecth of score should be the worst, one with highest median socre should be the best, and the other one should be the moderate.  
+Let's verify this by a summarise of the data.
+```{r}
+mv %>% 
+    group_by(critics_rating) %>% 
+    dplyr::summarise(avg = mean(critics_score), 
+                    med = median(critics_score), 
+                    span = max(critics_score) - min(critics_score),  
+                    count = n()) %>% 
+    arrange(desc(med))
+```
+Now that we know the 3-level critics_rating could be a reflection of `critics_score`. From the plot we can tell that there is no intersection between rate 'Fresh' and 'Rotten', that's cool, but there's some intersection on score between 'Fresh' and 'Certified Fresh'. There might be some other factors that leads to this overlap.
+  
+Let's do the same thing to `audience_rating` and `audience_score`.  
+```{r}
+ggpairs(mv, columns = 17:18)
+```
+  
+The `audience_score` vs `audience_score` plot shows a very clear bimodel pattern. And there seems to be no intersect on score between two rates. 
+Let's check it.  
+```{r}
+mv %>% 
+    group_by(audience_rating) %>% 
+    summarise(min = min(audience_score), max = max(audience_score))
+```
+Wow! Exactly no intersection! In this pair of variable we can be more confident to say that the `audience_rating` is simply a reflection of `audienct_score`.  
+
+*Later in the analysis, we may exclude `critics_rating` and `audience_rating` in building a model, for they carry redundant information along with the other two numerical variables.*
+
+
+**Next,** let's consider the `imdb_num_votes` variable and think about whether the movies with a small number of voters is appropriate to be included in a generalizing model.  
+```{r}
+ggplot(data = mv, aes(x = imdb_num_votes)) + 
+    geom_density()
+```
+  
+The imdb_num_votes is highly right skewed. I'm going to visulize the skewness by adding vertical lines at quantile points.  
+```{r}
+vt_qt <- quantile(mv$imdb_num_votes, 
+                  probs=c(0.25, 0.50, 0.75))
+
+ggplot(data = mv, aes(x = imdb_num_votes)) + 
+    geom_density() + 
+    geom_vline(xintercept = vt_qt[1], color = 'red', linetype = 'dashed') + 
+    geom_vline(xintercept = vt_qt[2], color = 'blue', linetype = 'dashed') + 
+    geom_vline(xintercept = vt_qt[3], color = 'green', linetype = 'dashed')
+```
+  
+  
+```{r}
+summary(mv$imdb_num_votes)
+```
+  
+There might be a constant portion of people who are movie fans, most of the movies gain their attention. Very few movies are phenomenal that they attract both movie fans and the vast majority of population. 
+
+Just for curiosity, if we slice the data by the quantiles of imdb_num_votes and look at their relationship with the 3 scoring variable, will there be significant difference by eye between groups?  
+```{r}
+mv$vt_quans <- cut(mv$imdb_num_votes, 
+               breaks = quantile(mv$imdb_num_votes, c(0, .25, .50, .75, 1)), 
+               include.lowest = TRUE)
+
+levels(mv$vt_quans) <- c('1st', '2nd', '3rd', '4th')
+
+score1 <- ggplot(data = mv, aes(x = vt_quans, y = imdb_rating)) + 
+    geom_boxplot()
+
+score2 <- ggplot(data = mv, aes(x = vt_quans, y = critics_score)) + 
+    geom_boxplot()
+
+score3 <- ggplot(data = mv, aes(x = vt_quans, y = audience_score)) + 
+    geom_boxplot()
+
+grid.arrange(score1, score2, score3, ncol = 2)
+```
+  
+There seems to be a slight curvilinear relationship between quantiles of number of votes and any of the 3 scoring variable.  
+
+*Going back to the original idea, I was thinking about whether to exclude the movies with too few votes, now that the minimum number of votes is 180(which may not be too small), I'll just keep them all.*  
+
+**Finally,** I'm going to combine current 3 scoring variable into a single one, and take it as the dependent variable.  
+
+Let's look at the distribution of the 3 scoring variable.  
+```{r}
+summary(mv$imdb_rating)
+```
+```{r}
+summary(mv$critics_score)
+```
+```{r}
+summary(mv$audience_score)
+```
+Seems `imdb_rating` is on a scale of zero to ten, and the other two uses a percentage grading system. If we convert the `imdb_rating` in percentage grading system (that is , simply multiply each number by 10), there are two streams of interesting trends shown in the stats above:    
+* For Min, 1st Qu., Median and Mean, the score of 3 groups follows "IMDB > audience > critics" pattern.   
+* For 3rd Qu. and Max, the score of 3 groups follows "critics > audence > IMDB", exactly the reverse order of the pattern above.    
+
+Looks like the IMDB users are more likely to give a moderate score and critics at Rotten Tomatoes likes to give extreme score. Let's see if their plots tells the same story.  
+```{r}
+sc_imdb <- ggplot(data = mv, aes(x = imdb_rating)) + 
+    geom_density()
+
+sc_cri <- ggplot(data = mv, aes(x = critics_score)) + 
+    geom_density()
+
+sc_aud <- ggplot(data = mv, aes(x = audience_score)) + 
+    geom_density()
+
+grid.arrange(sc_imdb, sc_cri, sc_aud, ncol = 2)
+```
+  
+The plots basicly shows the same patterns and more detailed information. By comparing the two extreme groups --- `imdb_rating` and `critics_rating`, we can see that an IMDB user is more likely to give a moderate score, while they are stingy to give extreme high or low score, and vice versa for  the critics. The `audience_score` acts like a transition between the two other groups. 
+
+Ah! What a work! Let's wrap up the EDA on scoring variables by construct a "grand score" variable. For the limited info at hand, there's no rule on how to do it. So I'm decided to make up one followig this formula: $$\widehat{grand\_sc} = 1/2 * (imdb\_rating * 10 + 1/2 * critics\_score + 1/2*audience\_score)$$
+
+I'm doing so for several reasons:   
+* `imdb_rating` should be converted into percentage grading system to ground the 3 source features the same scale  
+* `critics_score` and `audience_score` are both from Rotten Tomatoes, I give each of them half the weight  
+* Sum up the above two sections and divide the sum by two, for they 3 are taken as 2 variables.    
+
+```{r}
+mv$grand_sc <- 0.5 * (mv$imdb_rating * 10 + 0.5*mv$critics_score + 0.5*mv$audience_score)
+
+ggplot(data = mv, aes(x = grand_sc)) + geom_density()
+```
+  
+Here's the `grand_sc` variable, as is within expectation, it is bimodeled and has a moderate left skewness.
+
+#### On potential independent variables  
+**My first question is,** for a categorical variable that don't have too many levels, is there any difference in `grand_sc` among levels.
+
+So I have to look at the number of unique values in each column.
+```{r}
+# I could have use levels() here, 
+# but some values of interest are not of factor type eg.title
+# so I just check the length of list of unique value instead
+sapply(mv, function(x) length(unique(x)))
+```
+Too many levels would result in very few sample in each level, which may lead to bias, therefore there's little sense to study them.  
+Following this idea, `title`, `studio`, `director` should be excluded, since they are categorical variables with too many levels.    
+
+```{r}
+drop <- c("title","studio", "director")
+mv <- mv[ , !(names(mv) %in% drop)]
+
+str(mv)
+```
+Apart from `grand_sc`, we have 12 variables of type Factor, 10 variables of type numeric, and 1 variable of type int.  
+I will look at the 12 Factor variables against `grand_sc` using boxplot.
+
+```{r}
+fac1 <- ggplot(data = mv, aes(x = title_type, y = grand_sc)) + geom_boxplot()
+fac2 <- ggplot(data = mv, aes(x = genre, y = grand_sc)) + geom_boxplot()
+fac3 <- ggplot(data = mv, aes(x = mpaa_rating, y = grand_sc)) + geom_boxplot()
+fac4 <- ggplot(data = mv, aes(x = critics_rating, y = grand_sc)) + geom_boxplot()
+fac5 <- ggplot(data = mv, aes(x = audience_rating, y = grand_sc)) + geom_boxplot()
+fac6 <- ggplot(data = mv, aes(x = best_pic_nom, y = grand_sc)) + geom_boxplot()
+fac7 <- ggplot(data = mv, aes(x = best_pic_win, y = grand_sc)) + geom_boxplot()
+fac8 <- ggplot(data = mv, aes(x = best_actor_win, y = grand_sc)) + geom_boxplot()
+fac9 <- ggplot(data = mv, aes(x = best_actress_win, y = grand_sc)) + geom_boxplot()
+fac10 <- ggplot(data = mv, aes(x = best_dir_win, y = grand_sc)) + geom_boxplot()
+fac11 <- ggplot(data = mv, aes(x = top200_box, y = grand_sc)) + geom_boxplot()
+fac12 <- ggplot(data = mv, aes(x = vt_quans, y = grand_sc)) + geom_boxplot()
+
+grid.arrange(fac1, fac2, fac3, fac4, fac5, fac6, ncol = 3)
+```
+```{r}
+grid.arrange(fac7, fac8, fac9, fac10, fac11, fac12, ncol = 3)
+```
+
+  
+  
+Just tell by eye, except for `best_actor_win` and `best_actress_win`, different levels of a factor do have some association with `grand_sc`.  
+
+
+**Second question，** is there any pattern between theater/dvd release date and `grand_sc`?  
+There are 6 variables concerning the the theatre and dvd release date. Let's see if there is some pattern between each of them and `grand_sc`.
+```{r}
+thtr1 <- ggplot(data = mv, aes(x = thtr_rel_year,  y = grand_sc)) + 
+    stat_summary(fun.y = median, geom = 'point')
+
+thtr2 <- ggplot(data = mv, aes(x = thtr_rel_month,  y = grand_sc)) + 
+    stat_summary(fun.y = median, geom = 'point')
+
+thtr3 <- ggplot(data = mv, aes(x = thtr_rel_day,  y = grand_sc)) + 
+    stat_summary(fun.y = median, geom = 'point')
+
+dvd1 <- ggplot(data = mv, aes(x = dvd_rel_year,  y = grand_sc)) + 
+    stat_summary(fun.y = median, geom = 'point')
+
+dvd2 <- ggplot(data = mv, aes(x = dvd_rel_month,  y = grand_sc)) + 
+    stat_summary(fun.y = median, geom = 'point')
+
+dvd3 <- ggplot(data = mv, aes(x = dvd_rel_day,  y = grand_sc)) + 
+    stat_summary(fun.y = median, geom = 'point')
+
+grid.arrange(thtr1, thtr2, thtr3, dvd1, dvd2, dvd3, ncol = 3)
+```
+  
+Looks like there's very little linear association between each of the date variable and `grand_sc`. To be cautious, let's check the correlation coeficient value and p value for each of them against `grand_sc`.
+```{r}
+date_col <- list(mv$thtr_rel_year, mv$thtr_rel_month, mv$thtr_rel_day, 
+             mv$dvd_rel_year, mv$dvd_rel_month, mv$dvd_rel_day)
+
+# this function will extract correlation coeficient estimate value and p value
+# of the cor.test of a date column and `grand_sc`
+cor_p_fun <- function(x){
+    cor_output <- cor.test(x, mv$grand_sc)
+    return(c(cor_output$estimate, cor_output$p.value))
+}
+
+# each row is the correlation coefficient and p-value from one cor.test
+ldply(date_col, cor_p_fun)
+```
+
+Not one of the 6 date variables have a correlation value greater than .07 with `grand_sc`, and for each of them, the p-value is too high that we cannot reject the null hypothesis that the correlation value is 0. Thus we can be confident that none of them has any linear  association with `grand_sc`.  
+
+
+**Finally,** let's look at the rest variables apart from `grand_sc`. They are `runtime`, `imdb_rating`, `imdb_num_votes`, `critics_score`, `audience_score`. 
+
+```{r}
+ggpairs(mv, columns = c("runtime", "imdb_rating", "imdb_num_votes", "critics_score", "audience_score", "grand_sc"), warnings = FALSE, message=  FALSE)
+```
+  
+There's no wonder that `grand_sc` & `imdb_rating`, `grand_sc` & `critics_score`, and `grand_sc` & `audience_score` pairs each has a strong linear relationship, cause `grand_sc` is constructed from the other 3.  
+
+The rest two, `runtime` and `imdb_num_votes` both provide weak correlation coefficient r.
+
+
+* * *
+
+## Part 4: Modeling
+
+#### construct the model  
+Uptill now, I have made up a variable(`grand_sc`) to indicate the popularity of a movie by combining other 3 variables, and identified some variables that are not appropriate to be included in a linear model. Here's the namelist of excluded variables by time order and the resoponding reason:  
+
+* Exclude `actor1` through `actor5`. These five variables are just ingredients of the other variables in this dataset(`best_actor_win` and `best_actress_win`).  
+* Exclude `imdb_url` and `rt_url`, they don't have anything to do with the analysis.  
+* Exclude `critics_rating` and `audience_rating`, they just reflects almost the same but more rough information on the popularity of a movie as their counterpart `critics_score` and `audience_score` does.  
+* Exclude `imdb_rating`, `critics_score` and `audience_score`, since they serve to make up `grand_sc`, there's no sense to use themselves to explain their combination.  
+* Exclude `title`, `studio` and `director`, for they have too many levels, leading to very few samples in each level.  
+* Exclude `best_actor_win` and `best_actress_win`, each of them has too little difference between levels.
+* Exclude 6 date variables(`thtr_rel_year`, `thtr_rel_month`, `thtr_rel_day`, `dvd_rel_year`, `dvd_rel_month` and `dvd_rel_day`), each of them do not have a significant correlation coefficient relationship with `grand_sc`.  
+
+```{r}
+drop <- c("actor1", "actor2", "actor3", "actor4", "actor5",
+          "imdb_url", "rt_url", "critics_rating", "audience_rating", 
+          "imdb_rating", "critics_score", "audience_score",   
+          "title","studio", "director", 
+          "best_actor_win", "best_actress_win", 
+          "thtr_rel_year", "thtr_rel_month", "thtr_rel_day", 
+          "dvd_rel_year", "dvd_rel_month", "dvd_rel_day")
+
+mv_md <- movies[ , !(names(movies) %in% drop)]
+
+mv_md$grand_sc <- mv$grand_sc
+
+names(mv_md)
+```
+Now I have 9 explaining variables left in hand.    
+
+
+I will use backward elimination in $R^2$ approach. Because compared to which variable(s) is(are) statistically significant, I am more interested in which set of variables as a whole best explains the variation in `grand_sc`.  
+
+Here's the full model.  
+```{r}
+md_full <- lm(grand_sc ~ title_type + genre + runtime + mpaa_rating +
+                    imdb_num_votes + best_pic_nom + best_pic_win + 
+                    best_dir_win + top200_box,     
+         data = mv_md)
+
+summary(md_full)
+```
+
+Now I'm going to eliminate one variable at a time, constructing 9 responding models, and extract the adjusted $R^2$ value for each.
+```{r}
+m1 <- lm(grand_sc ~ genre + runtime + mpaa_rating +
+                    imdb_num_votes + best_pic_nom + best_pic_win + 
+                    best_dir_win + top200_box,     
+         data = mv_md)
+m2 <- lm(grand_sc ~ title_type + runtime + mpaa_rating +
+                    imdb_num_votes + best_pic_nom + best_pic_win + 
+                    best_dir_win + top200_box,     
+         data = mv_md)
+m3 <- lm(grand_sc ~ title_type + genre + mpaa_rating +
+                    imdb_num_votes + best_pic_nom + best_pic_win + 
+                    best_dir_win + top200_box,     
+         data = mv_md)
+m4 <- lm(grand_sc ~ title_type + genre + runtime +
+                    imdb_num_votes + best_pic_nom + best_pic_win + 
+                    best_dir_win + top200_box,     
+         data = mv_md)
+m5 <- lm(grand_sc ~ title_type + genre + runtime + mpaa_rating +
+                    best_pic_nom + best_pic_win + 
+                    best_dir_win + top200_box,     
+         data = mv_md)
+m6 <- lm(grand_sc ~ title_type + genre + runtime + mpaa_rating +
+                    imdb_num_votes + best_pic_win + 
+                    best_dir_win + top200_box,     
+         data = mv_md)
+m7 <- lm(grand_sc ~ title_type + genre + runtime + mpaa_rating +
+                    imdb_num_votes + best_pic_nom + 
+                    best_dir_win + top200_box,     
+         data = mv_md)
+m8 <- lm(grand_sc ~ title_type + genre + runtime + mpaa_rating +
+                    imdb_num_votes + best_pic_nom + best_pic_win + 
+                    top200_box,     
+         data = mv_md)
+m9 <- lm(grand_sc ~ title_type + genre + runtime + mpaa_rating +
+                    imdb_num_votes + best_pic_nom + best_pic_win + 
+                    best_dir_win,     
+         data = mv_md)
+
+models1 <- list(m1, m2, m3, m4, m5, m6, m7, m8, m9)
+
+ldply(models1, function(x) summary(x)$adj.r.squared)
+
+```
+
+The last one gives the highest adjusted $R^2$ value, so the first variable to be excluded is `top200_box`. M9 is the new full model.  
+
+```{r}
+m91 <- lm(grand_sc ~ genre + runtime + mpaa_rating +
+                    imdb_num_votes + best_pic_nom + best_pic_win + 
+                    best_dir_win,     
+         data = mv_md)
+m92 <- lm(grand_sc ~ title_type + runtime + mpaa_rating +
+                    imdb_num_votes + best_pic_nom + best_pic_win + 
+                    best_dir_win,     
+         data = mv_md)
+m93 <- lm(grand_sc ~ title_type + genre + mpaa_rating +
+                    imdb_num_votes + best_pic_nom + best_pic_win + 
+                    best_dir_win,     
+         data = mv_md)
+m94 <- lm(grand_sc ~ title_type + genre + runtime +
+                    imdb_num_votes + best_pic_nom + best_pic_win + 
+                    best_dir_win,     
+         data = mv_md)
+m95 <- lm(grand_sc ~ title_type + genre + runtime + mpaa_rating +
+                    best_pic_nom + best_pic_win + 
+                    best_dir_win,     
+         data = mv_md)
+m96 <- lm(grand_sc ~ title_type + genre + runtime + mpaa_rating +
+                    imdb_num_votes + best_pic_win + 
+                    best_dir_win,     
+         data = mv_md)
+m97 <- lm(grand_sc ~ title_type + genre + runtime + mpaa_rating +
+                    imdb_num_votes + best_pic_nom + 
+                    best_dir_win,     
+         data = mv_md)
+m98 <- lm(grand_sc ~ title_type + genre + runtime + mpaa_rating +
+                    imdb_num_votes + best_pic_nom + best_pic_win ,     
+         data = mv_md)
+
+models2 <- list(m91, m92, m93, m94, m95, m96, m97, m98)
+
+ldply(models2, function(x) summary(x)$adj.r.squared)
+```
+
+The new full model m9 has a adjusted $R^2$ value of 0.3992460, after eliminating a second variable, no model grants a higher adjusted $R^2$ value than it.  
+  
+So, the final model is m9.
+
+```{r}
+summary(m9)
+```
+  
+    
+    
+#### model diagnostics  
+The model's validity depends on the following four assumptions:  
+1. the residuals of the model are nearly normal  
+2. the variability of the residuals is nearly constant  
+3. the residuals are independent   
+4. each variable is linearly related to the outcome.  
+
+
+```{r}
+res0 <- ggplot(data=m9, aes(sample = .resid)) + 
+               stat_qq(alpha = 1/3) +
+               xlab('Theoretical quantiles') +
+               ylab('Residuals')
+
+res1 <- ggplot(data = m9, aes(x = .resid)) + 
+            geom_histogram(fill = NA, color = 'black')
+
+res2 <- ggplot(data = m9, aes(x=.fitted, y=abs(.resid))) + 
+            geom_point(alpha = 1/3) + 
+            geom_hline(yintercept = 0, linetype = 'dashed') + 
+            geom_smooth(se=FALSE)
+
+res3 <- ggplot(data = m9, aes(x=.fitted, y=.resid)) + 
+            geom_point(alpha = 1/3) + 
+            geom_hline(yintercept = 0, linetype = 'dashed') + 
+            geom_smooth(se=FALSE)
+
+
+grid.arrange(res0, res1, res2, res3, ncol =2)
+```
+
+* The plots in the first row show the residuals follow a nearly normal distribution.    
+* At first glance of the second row, we might say that the variability is not so constant, the larger the fitted value, the larger the residual. However, the upper bound of `grand_sc` should be 100, since it's made up from other 3 variables with the same upper bound 100. If we take out the points with fitted value higher than 100, we can say that the variability of residuals is constant.  `(this implies later in prediction, we should be cautious when fitted value exceeds 100)`
+* For the third assumption, since the rows of the dataset is not a time series, they are just random samples, we can take it as each sample is independent and their residuals are independent as well.  
+* For the fourth assumption, I've already taken out the variables that are not linearly related to the outcome earlier in modeling phase.  
+
+
+#### interpretation of model coefficients
+
+```{r}
+# extract the correlation coefficient estimate of each feature
+summary(m9)$coefficient[, 1]
+```
+
+The coefficient of each variable($x$) above, denoted as $\beta$, simply means:  
+  
+* if $x$ is a categorical variable, else hold constant, when $x=1$, the expected grand score is increased by $\beta$.  
+* if $x$ is a numerical variable, else hold constant, when $x$ increase by 1, the expected grand score is increased by $\beta$.  
+
+```{r}
+lapply(mv_md, levels)
+```
+  
+  
+Our goal is to find out what attribute associates with a popular movie. Thinking in the 9 variables, we are to find the level(for categorical ones) and the position on a spectrum(for numerical ones) that provides the biggest estimated `grand_sc` value.  
+  
+* Else held constant, for `title_type`, the two levels listed in model all have negative slope, so the reference level "Documentary" provides the highest expected value of grand score.  
+* Else held constant, for `genre`, level "Musical & Performing Arts" brings up the most expected grand score of 17.61 points.
+* Else held constant, longer `runtime` provides higher expected grand score, each one minute longer would bring .06 point expected grand score higher.  
+* Else held constant, for `mpaa_rating`, level "G" provides highest grand score on average.  
+* Else held constant, more `imdb_num_votes` provides higher expected grand score, each vote brings up 0.000045 point in grand score on average.  
+* Else held constant, a "yes" in `best_pic_nom` and `best_dir_win`, along with a "no" in `best_pic_win` would generate the highest expected grand score.  
+
+* * *
+
+## Part 5: Prediction
+
+
+I pick the movie "La La Land" since it's my favourite in recent months.  
+The `grand_sc` we want to predict is made up from 3 other variables following this fomular: $$\widehat{grand\_sc} = 1/2 * (imdb\_rating * 10 + 1/2 * critics\_score + 1/2*audience\_score)$$  
+So first I fetch 3 scoring variables from [IMDB   ](http://www.imdb.com/title/tt3783958/?ref_=fn_al_tt_1) and [Rotten Tomatoes](https://www.rottentomatoes.com/m/la_la_land) page, and calculate the true `grand_sc`, which is 85.5.  
+```{r}
+1/2 * (8.3*10 + 0.5*93 + 0.5*83)
+```
+
+Then I gather the 9 eplaining variables from  [IMDB   ](http://www.imdb.com/title/tt3783958/?ref_=fn_al_tt_1), [Rotten Tomatoes](https://www.rottentomatoes.com/m/la_la_land) and [BoxOfficeMojo Top200 list](http://www.boxofficemojo.com/alltime/world/) into a data frame, and plug it in the prediction function as well as the final model `m9`.   
+```{r}
+lll <- data.frame(title_type = "Feature Film",
+                  genre = "Musical & Performing Arts",
+                  runtime = 128,
+                  mpaa_rating = "PG-13",
+                  imdb_num_votes = 232753,
+                  best_pic_nom = "yes",
+                  best_pic_win = "no",
+                  best_dir_win = "yes",
+                  top200_box = "no")
+
+predict(m9, lll)
+
+```
+
+The fitted value `grand_sc` is 89.83, while the true `grand_sc` is 85.5, looks not bad! But is 89.83 a good estimation of 85.5 statistically?  
+
+To answer this question, let's set the interval argument in predict function.  
+```{r}
+predict(m9, lll, interval = 'predict')
+```
+
+With a lower bound of 62.89 and an upper bound of 116.78, the fitted value 89.83 is actually quite close to the true value 85.5. Our model did well!
+
+
+* * *
+
+## Part 6: Conclusion
+
+* Basically what I have done in this analysis is, first divide variables into two groups: dependent and independent. Then for the dependent group, I eliminated some redundant ones and "merge" the rest into one single variable; for the independent group, I omitted some irrelevant ones and some who provided little information. Next, I used backward elinimation in $R^2$ approach to find the best fit model. Finally, I plugged the attributes of movie "La La Land" with the fitted model and get a pretty good estimation.  
+  
+* From the model we can conclude that a movie with "Documentary" `title_type`, "Musical & Performing Arts" `genre`, "G" `mpaa_rating`, nominated in `best_pic_nom`, win `best_dir_win` but doesn't get `best_pic_win`, with an better-longer `runtime` and a better-more `imdb_num_votes` would **theoretically** have the most popularity, which is measured in `grand_sc`.    
+
+* Though I like my work, there's some innegligible shortcomings that I have to state.  
+    * I've omitted the categorical variable `critics_rating`, for I thought it contains the same but more rough information as the numerical `critics_score`. However, there's some overlapping in scores fall in the first and second levels of `critics_rating`. Thus the `critics_rating` variable does bring some new information in, it should be included in the constructing of `grand_sc`.
+    * I made up the `grand_sc` as dependent variable with a set of arbitrary weight: .5, .25 and .25 for `imdb_rating`, `critics_score` and `audience_score`. The 3 weights should be reconsidered with more information from the website.  
+    * As stated in the model diagnostic part, there's the possibility to get a fitted value higher than 100, which has no sense in reality. Future studies could find a way to avoid this situation. 
+    * There is a "Documentary" level in both `title_type` and `genre`. Future studies could optimize the class of a movie so there could be minimum collinearity.  
+
